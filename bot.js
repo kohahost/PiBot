@@ -124,6 +124,6 @@ async function sendBalance(publicKey, keypair) {
       console.error("❌ Error saat proses:", e?.response?.data || e.message);
     }
 
-    await new Promise(resolve => setTimeout(resolve, 449)); // Delay pasif (1 detik)
+    await new Promise(resolve => setTimeout(resolve, 449)); // Delay pasif (449 ms)
   }
 })();
