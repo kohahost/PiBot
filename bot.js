@@ -2,96 +2,128 @@ const StellarSdk = require('stellar-sdk');
 const ed25519 = require('ed25519-hd-key');
 const bip39 = require('bip39');
 const axios = require('axios');
-require("dotenv").config();
+require('dotenv').config();
 
-async function getPiWalletAddressFromSeed(mnemonic) {
-    // Validate seed phrase
-    if (!bip39.validateMnemonic(mnemonic)) {
-        throw new Error("Invalid mnemonic");
-    }
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const MNEMONIC = process.env.MNEMONIC;
+const RECEIVER_ADDRESS = process.env.RECEIVER_ADDRESS;
 
-    // Get seed from mnemonic
-    const seed = await bip39.mnemonicToSeed(mnemonic);
+const server = new StellarSdk.Server('https://api.mainnet.minepi.com');
 
-    // Pi Wallet (like Stellar) uses path m/44'/314159'/0'
-    const derivationPath = "m/44'/314159'/0'";
-    const { key } = ed25519.derivePath(derivationPath, seed.toString('hex'));
-
-    // Create Stellar keypair from derived private key
-    const keypair = StellarSdk.Keypair.fromRawEd25519Seed(key);
-
-    const publicKey = keypair.publicKey();
-    const secretKey = keypair.secret();
-
-    console.log("🚀 Public Key (Sender Pi Wallet Address):", keypair.publicKey());
-
-    return { publicKey, secretKey };
+async function getKeypairFromMnemonic(mnemonic) {
+  const seed = await bip39.mnemonicToSeed(mnemonic);
+  const { key } = ed25519.derivePath("m/44'/314159'/0'", seed.toString('hex'));
+  return StellarSdk.Keypair.fromRawEd25519Seed(key);
 }
 
-async function sendPi() {
-    const server = new StellarSdk.Server('https://api.mainnet.minepi.com');
-    const mnemonic = process.env.MNEMONIC;
-    const recipient = process.env.RECEIVER_ADDRESS;
-    const wallet = await getPiWalletAddressFromSeed(mnemonic);
-    const senderSecret = wallet.secretKey;
-    const senderKeypair = StellarSdk.Keypair.fromSecret(senderSecret);
-    const senderPublic = wallet.publicKey;
-    const apiUrl = `https://api.mainnet.minepi.com/accounts/${senderPublic}`;
+async function notifyTelegram(message) {
+  try {
+    await axios.post(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+      chat_id: TELEGRAM_CHAT_ID,
+      text: message,
+      parse_mode: "Markdown"
+    });
+  } catch (e) {
+    console.error("❌ Gagal kirim Telegram:", e.message);
+  }
+}
+
+async function claimBalances(publicKey, keypair) {
+  const url = `https://api.mainnet.minepi.com/claimable_balances?claimant=${publicKey}&limit=100`;
+  const res = await axios.get(url);
+  const records = res.data._embedded?.records || [];
+
+  if (records.length === 0) return false;
+
+  for (const claim of records) {
     try {
-        const account = await server.loadAccount(senderPublic);
+      const account = await server.loadAccount(publicKey);
+      const baseFee = await server.fetchBaseFee();
 
-        const baseFee = await server.fetchBaseFee();
-        const fee = (baseFee * 2).toString(); // Dynamically doubled gas fee
-        console.log(`⛽ Base Fee: ${baseFee / 1e7}, Doubled Fee: ${fee / 1e7}`);
+      const tx = new StellarSdk.TransactionBuilder(account, {
+        fee: baseFee.toString(),
+        networkPassphrase: 'Pi Network',
+      })
+        .addOperation(StellarSdk.Operation.claimClaimableBalance({ balanceId: claim.id }))
+        .setTimeout(30)
+        .build();
 
-        const res = await axios.get(apiUrl);
-        const balance = res.data.balances[0].balance;
-        console.log(`Pi Balance: ${balance}`);
-
-        const withdrawAmount = Number(balance) - 2;
-        if (withdrawAmount <= 0) {
-            console.log("⚠️ Not enough Pi to send. Skipping...");
-            console.log(`-------------------------------------------------------------------------------------`)
-        } else {
-            const formattedAmount = withdrawAmount.toFixed(7).toString();
-            console.log(`➡️ Sending: ${formattedAmount} Pi`);
-
-            const tx = new StellarSdk.TransactionBuilder(account, {
-                fee,
-                networkPassphrase: 'Pi Network',
-            })
-                .addOperation(StellarSdk.Operation.payment({
-                    destination: recipient,
-                    asset: StellarSdk.Asset.native(),
-                    amount: formattedAmount,
-                }))
-                .setTimeout(30)
-                .build();
-
-            tx.sign(senderKeypair);
-
-            const result = await server.submitTransaction(tx);
-
-            if (result && result.transaction_hash !== false) {
-                console.log("✅ Tx Hash:", result);
-                console.log(`🔗 View Tx: https://api.mainnet.minepi.com/transactions/${result.hash}`);
-                console.log(`-------------------------------------------------------------------------------------`)
-            } else {
-                console.log("⚠️ Transaction submitted but not confirmed successful:", result);
-                console.log(`-------------------------------------------------------------------------------------`)
-            }
-        }
+      tx.sign(keypair);
+      await server.submitTransaction(tx);
+      console.log(`✅ Klaim sukses: ${claim.id}`);
     } catch (e) {
-        console.error('❌ Error:', e.response?.data?.extras?.result_codes || e.message || e);
-        console.log(`-------------------------------------------------------------------------------------`)
-    } finally {
-        setTimeout(sendPi, 499); // Run again after 999 ms
+      console.log(`⚠️ Gagal klaim: ${claim.id}`, e?.response?.data || e.message);
     }
+  }
+
+  return true;
 }
 
-sendPi(); // Start the loop
+async function sendBalance(publicKey, keypair) {
+  const res = await axios.get(`https://api.mainnet.minepi.com/accounts/${publicKey}`);
+  const native = res.data.balances.find(b => b.asset_type === 'native');
+  const balance = parseFloat(native?.balance || '0');
 
+  if (balance <= 0.02) return false;
 
+  const sendAmount = (balance - 0.01).toFixed(7);
+  const account = await server.loadAccount(publicKey);
+  const baseFee = await server.fetchBaseFee();
 
-// PI auto withdraw bot
-// telegram: @autoboyt
+  const tx = new StellarSdk.TransactionBuilder(account, {
+    fee: baseFee.toString(),
+    networkPassphrase: 'Pi Network',
+  })
+    .addOperation(StellarSdk.Operation.payment({
+      destination: RECEIVER_ADDRESS,
+      asset: StellarSdk.Asset.native(),
+      amount: sendAmount,
+    }))
+    .setTimeout(30)
+    .build();
+
+  tx.sign(keypair);
+  const result = await server.submitTransaction(tx);
+
+  if (result?.hash) {
+    const link = `https://api.mainnet.minepi.com/transactions/${result.hash}`;
+    console.log(`✅ Kirim sukses: ${sendAmount} Pi`);
+    await notifyTelegram(`✅ Berhasil kirim ${sendAmount} Pi\n🔗 ${link}`);
+    return true;
+  }
+
+  return false;
+}
+
+(async function monitor() {
+  const keypair = await getKeypairFromMnemonic(MNEMONIC);
+  const publicKey = keypair.publicKey();
+  let lastBalance = 0;
+
+  console.log(`🚀 Monitoring wallet: ${publicKey}`);
+
+  while (true) {
+    try {
+      const res = await axios.get(`https://api.mainnet.minepi.com/accounts/${publicKey}`);
+      const native = res.data.balances.find(b => b.asset_type === 'native');
+      const balance = parseFloat(native?.balance || '0');
+
+      if (balance !== lastBalance) {
+        console.log(`💰 Saldo berubah: ${lastBalance} -> ${balance}`);
+        lastBalance = balance;
+
+        const claimed = await claimBalances(publicKey, keypair);
+        const sent = await sendBalance(publicKey, keypair);
+
+        if (!claimed && !sent) {
+          console.log("ℹ️ Tidak ada yang bisa diklaim/dikirim.");
+        }
+      }
+    } catch (e) {
+      console.error("❌ Error saat proses:", e?.response?.data || e.message);
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 449)); // Delay pasif (1 detik)
+  }
+})();
