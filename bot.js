@@ -9,7 +9,7 @@ const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const MNEMONIC = process.env.MNEMONIC;
 const RECEIVER_ADDRESS = process.env.RECEIVER_ADDRESS;
 
-const server = new StellarSdk.Server('https://api.mainnet.minepi.com');
+const server = new StellarSdk.Server('https://api-mainnet.vercel.app');
 
 async function getKeypairFromMnemonic(mnemonic) {
   const seed = await bip39.mnemonicToSeed(mnemonic);
@@ -30,7 +30,7 @@ async function notifyTelegram(message) {
 }
 
 async function claimBalances(publicKey, keypair) {
-  const url = `https://api.mainnet.minepi.com/claimable_balances?claimant=${publicKey}&limit=100`;
+  const url = `https://api-mainnet.vercel.app/claimable_balances?claimant=${publicKey}&limit=200`;
   const res = await axios.get(url);
   const records = res.data._embedded?.records || [];
 
@@ -61,7 +61,7 @@ async function claimBalances(publicKey, keypair) {
 }
 
 async function sendBalance(publicKey, keypair) {
-  const res = await axios.get(`https://api.mainnet.minepi.com/accounts/${publicKey}`);
+  const res = await axios.get(`https://api-mainnet.vercel.app/accounts/${publicKey}`);
   const native = res.data.balances.find(b => b.asset_type === 'native');
   const balance = parseFloat(native?.balance || '0');
 
@@ -87,7 +87,7 @@ async function sendBalance(publicKey, keypair) {
   const result = await server.submitTransaction(tx);
 
   if (result?.hash) {
-    const link = `https://api.mainnet.minepi.com/transactions/${result.hash}`;
+    const link = `https://api-mainnet.vercel.app/transactions/${result.hash}`;
     console.log(`✅ Kirim sukses: ${sendAmount} Pi`);
     await notifyTelegram(`✅ Berhasil kirim ${sendAmount} Pi\n🔗 ${link}`);
     return true;
